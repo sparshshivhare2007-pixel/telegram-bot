@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import random
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -9,6 +10,7 @@ from telegram.ext import (
 
 from config import Config
 from database import Database
+from telethon_session import TelegramMessageFetcher
 
 # Setup logging
 logging.basicConfig(
@@ -97,7 +99,17 @@ async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
         chat_id = update.callback_query.message.chat.id
     
-    messages = db.get_messages(chat_id, limit=20)
+    # Check if limit provided
+    limit = 20
+    if context.args:
+        try:
+            limit = int(context.args[0])
+            if limit > 100:
+                limit = 100
+        except:
+            pass
+    
+    messages = db.get_messages(chat_id, limit=limit)
     
     if not messages:
         text = "📭 No messages found in your history!"
@@ -153,13 +165,12 @@ async def clear_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     result = db.delete_chat_data(chat_id)
     
-    await update.callback_query.message.reply_text(
-        f"🧹 **Data Cleared!**\n\n"
-        f"✅ {result['messages_deleted']} messages deleted\n"
-        f"✅ Chat removed from active list\n\n"
-        f"*Start chatting again to save new data*",
-        parse_mode="Markdown"
-    )
+    text = f"🧹 **Data Cleared!**\n\n✅ {result['messages_deleted']} messages deleted\n✅ Chat removed from active list\n\n*Start chatting again to save new data*"
+    
+    if update.callback_query:
+        await update.callback_query.message.reply_text(text, parse_mode="Markdown")
+    else:
+        await update.message.reply_text(text, parse_mode="Markdown")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show help"""
@@ -187,36 +198,198 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(text, parse_mode="Markdown")
 
+# ---------- TELEGRAM SESSION COMMANDS ----------
+
+async def add_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Add Telegram session for fetching messages"""
+    chat_id = update.effective_chat.id
+    
+    # Check if admin
+    if str(chat_id) != Config.ADMIN_ID:
+        await update.message.reply_text("❌ Only admin can use this command!")
+        return
+    
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            "📱 **Add Telegram Session**\n\n"
+            "Usage: `/addsession +91XXXXXXXXXX`\n\n"
+            "Then verify using: `/verifycode <code>`",
+            parse_mode="Markdown"
+        )
+        return
+    
+    phone = args[0]
+    
+    try:
+        fetcher = TelegramMessageFetcher()
+        result = await fetcher.create_session(phone)
+        
+        if result["status"] == "code_sent":
+            await update.message.reply_text(
+                f"✅ Code sent to {phone}\n"
+                f"📲 Enter OTP: `/verifycode <code>`"
+            )
+        else:
+            await update.message.reply_text(f"❌ Error: {result.get('error')}")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def verify_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Verify OTP code for session"""
+    chat_id = update.effective_chat.id
+    
+    if str(chat_id) != Config.ADMIN_ID:
+        await update.message.reply_text("❌ Only admin can use this command!")
+        return
+    
+    args = context.args
+    if not args:
+        await update.message.reply_text("Usage: `/verifycode <code>`", parse_mode="Markdown")
+        return
+    
+    code = args[0]
+    phone = Config.TELEGRAM_PHONE
+    
+    try:
+        fetcher = TelegramMessageFetcher()
+        result = await fetcher.verify_code(phone, code)
+        
+        if result["status"] == "success":
+            await update.message.reply_text(
+                f"✅ Session created successfully!\n"
+                f"📌 Session: `{result['session']}`\n\n"
+                f"Use `/fetchmsg <chat_id> <limit>` to fetch messages",
+                parse_mode="Markdown"
+            )
+        else:
+            await update.message.reply_text(f"❌ Error: {result.get('error')}")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def fetch_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Fetch messages from Telegram chat"""
+    chat_id = update.effective_chat.id
+    
+    if str(chat_id) != Config.ADMIN_ID:
+        await update.message.reply_text("❌ Only admin can use this command!")
+        return
+    
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            "Usage: `/fetchmsg <chat_id> <limit>`\n\n"
+            "Example: `/fetchmsg -1001234567890 50`",
+            parse_mode="Markdown"
+        )
+        return
+    
+    target_chat = args[0]
+    limit = int(args[1]) if len(args) > 1 else 50
+    
+    try:
+        await update.message.reply_text(f"🔄 Fetching {limit} messages from {target_chat}...")
+        
+        fetcher = TelegramMessageFetcher()
+        result = await fetcher.fetch_messages(
+            Config.TELEGRAM_PHONE,
+            target_chat,
+            limit
+        )
+        
+        if result["status"] == "success":
+            msg = f"✅ Fetched {result['count']} messages\n\n"
+            for m in result["messages"][:10]:
+                msg += f"📝 {m['from']}: {m['text'][:100]}\n"
+            
+            if len(msg) > 4000:
+                msg = msg[:4000] + "...\n\n📌 Showing first 10 messages"
+            
+            await update.message.reply_text(msg)
+        else:
+            await update.message.reply_text(f"❌ Error: {result.get('error')}")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def listen_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start listening to Telegram messages"""
+    chat_id = update.effective_chat.id
+    
+    if str(chat_id) != Config.ADMIN_ID:
+        await update.message.reply_text("❌ Only admin can use this command!")
+        return
+    
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            "Usage: `/listen <chat_id>`\n"
+            "Example: `/listen -1001234567890`",
+            parse_mode="Markdown"
+        )
+        return
+    
+    target_chat = args[0]
+    
+    await update.message.reply_text(f"👂 Listening to messages from {target_chat}...\nPress Ctrl+C to stop")
+    
+    try:
+        fetcher = TelegramMessageFetcher()
+        await fetcher.listen_messages(Config.TELEGRAM_PHONE, target_chat)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
 # ---------- UTILITY FUNCTIONS ----------
 
 def generate_response(message):
     """Generate simple response (Replace with AI later)"""
     msg = message.lower()
     
-    if msg in ['hi', 'hello', 'hey', 'namaste']:
-        return "👋 Hello! How can I help you today?"
-    elif msg in ['bye', 'goodbye', 'tata']:
-        return "👋 Goodbye! Come back anytime!"
+    if msg in ['hi', 'hello', 'hey', 'namaste', 'hii', 'hy']:
+        return random.choice([
+            "👋 Hello! How can I help you today?",
+            "Hey there! 😊 What's up?",
+            "Namaste! 🙏 Welcome!",
+            "Hi! ✨ Good to see you!"
+        ])
+    elif msg in ['bye', 'goodbye', 'tata', 'bye bye']:
+        return random.choice([
+            "👋 Goodbye! Have a great day!",
+            "Take care! 😊 Come back anytime!",
+            "Bye! 🌟 Stay awesome!"
+        ])
     elif 'help' in msg:
         return "🆘 I'm here to help! Use /help to see all commands."
     elif 'joke' in msg:
         jokes = [
             "Why do programmers prefer dark mode? Because light attracts bugs! 🐛",
             "What do you call a bear with no teeth? A gummy bear! 🐻",
-            "Why did the scarecrow win an award? He was outstanding in his field! 🌾"
+            "Why did the scarecrow win an award? He was outstanding in his field! 🌾",
+            "What's a computer's favorite snack? Microchips! 🍟"
         ]
-        import random
         return random.choice(jokes)
-    elif 'how are you' in msg:
-        return "🤖 I'm doing great! Thanks for asking. How can I assist you?"
+    elif 'how are you' in msg or 'how r u' in msg:
+        return random.choice([
+            "🤖 I'm doing great! Thanks for asking!",
+            "I'm awesome! 💫 How about you?",
+            "Feeling fantastic! 😊 Thanks!"
+        ])
+    elif 'thank' in msg:
+        return random.choice([
+            "You're welcome! 😊",
+            "My pleasure! ✨",
+            "Anytime! 🙌"
+        ])
+    elif 'what is your name' in msg or 'your name' in msg:
+        return "🤖 I'm your friendly Telegram bot! You can call me Botty!"
     else:
         responses = [
-            f"📝 I got your message: '{message[:50]}...'",
+            f"📝 Got it: '{message[:50]}...'",
             "🤔 Interesting! Tell me more.",
             "💡 That's cool! What else?",
-            "👍 Got it! Anything else I can help with?"
+            "👍 Got it! Anything else I can help with?",
+            "😊 I'm listening! Go on...",
+            "🤖 Processing... Done! What next?"
         ]
-        import random
         return random.choice(responses)
 
 # ---------- CALLBACK HANDLER ----------
@@ -234,6 +407,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await clear_data(update, context)
     elif query.data == "help":
         await help_command(update, context)
+
+# ---------- ERROR HANDLER ----------
+
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Log errors"""
+    logger.error(f"Update {update} caused error {context.error}")
 
 # ---------- MAIN ----------
 
@@ -255,11 +434,23 @@ def main():
     app.add_handler(CommandHandler("clear", clear_data))
     app.add_handler(CommandHandler("help", help_command))
     
+    # Telethon session commands
+    app.add_handler(CommandHandler("addsession", add_session))
+    app.add_handler(CommandHandler("verifycode", verify_code))
+    app.add_handler(CommandHandler("fetchmsg", fetch_messages))
+    app.add_handler(CommandHandler("listen", listen_messages))
+    
+    # Message handlers
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(CallbackQueryHandler(button_callback))
     
+    # Error handler
+    app.add_error_handler(error_handler)
+    
     # Start bot
     logger.info("🤖 Bot is running! Press Ctrl+C to stop.")
+    logger.info(f"📊 Commands available: /start, /history, /stats, /clear, /help")
+    logger.info(f"🔐 Admin commands: /addsession, /verifycode, /fetchmsg, /listen")
     app.run_polling()
 
 if __name__ == "__main__":
