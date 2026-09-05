@@ -12,11 +12,16 @@ class Database:
         self.messages = self.db[Config.COLLECTION_MESSAGES]
         self.active_chats = self.db[Config.COLLECTION_CHATS]
         
-        # Create indexes for better performance
-        self.messages.create_index([("chat_id", 1), ("timestamp", -1)])
-        self.messages.create_index("session_id")
-        self.active_chats.create_index("chat_id", unique=True)
-        self.active_chats.create_index("last_active", -1)
+        # Create indexes safely
+        try:
+            self.messages.create_index([("chat_id", 1), ("timestamp", -1)])
+            self.messages.create_index("session_id")
+            self.active_chats.create_index("chat_id", unique=True)
+            # Fix: Use ASCENDING order for last_active
+            self.active_chats.create_index([("last_active", -1)])
+            logger.info("✅ MongoDB indexes created successfully")
+        except Exception as e:
+            logger.warning(f"⚠️ Index creation warning: {e}")
         
         logger.info("✅ Connected to MongoDB")
 
@@ -139,10 +144,38 @@ class Database:
             "chat_deleted": chat_result.deleted_count > 0
         }
 
-    # ---------- AI INTENT OPERATIONS ----------
-    def update_message_intent(self, message_id, intent, confidence):
-        """Update message with AI intent data"""
-        self.messages.update_one(
-            {"_id": message_id},
-            {"$set": {"intent": intent, "confidence": confidence}}
+    # ---------- TELEGRAM SESSION OPERATIONS ----------
+    def save_telegram_session(self, phone, session_string):
+        """Save Telegram session for message fetching"""
+        collection = self.db["telegram_sessions"]
+        collection.update_one(
+            {"phone": phone},
+            {"$set": {"session_string": session_string, "updated_at": datetime.utcnow()}},
+            upsert=True
         )
+        logger.info(f"📱 Telegram session saved for {phone}")
+
+    def get_telegram_session(self, phone):
+        """Get Telegram session"""
+        collection = self.db["telegram_sessions"]
+        result = collection.find_one({"phone": phone})
+        return result.get("session_string") if result else None
+
+    def store_telegram_messages(self, chat_id, messages):
+        """Store messages fetched from Telegram"""
+        collection = self.db["telegram_fetched_messages"]
+        for msg in messages:
+            doc = {
+                "chat_id": str(chat_id),
+                "message_id": msg.id,
+                "text": msg.text if hasattr(msg, 'text') else str(msg),
+                "date": msg.date,
+                "from_user": msg.from_user.username if msg.from_user else None,
+                "stored_at": datetime.utcnow()
+            }
+            collection.update_one(
+                {"chat_id": str(chat_id), "message_id": msg.id},
+                {"$set": doc},
+                upsert=True
+            )
+        logger.info(f"📥 Stored {len(messages)} messages from Telegram")
