@@ -13,6 +13,10 @@ class Config:
     COLLECTION_MESSAGES = os.getenv("COLLECTION_MESSAGES", "messages")
     COLLECTION_CHATS = os.getenv("COLLECTION_CHATS", "active_chats")
     
+    # Telegram API (for Telethon)
+    TELEGRAM_API_ID = int(os.getenv("TELEGRAM_API_ID", 0))
+    TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH", "")
+    
     # AI
     AI_ENABLED = os.getenv("AI_ENABLED", "false").lower() == "true"
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
